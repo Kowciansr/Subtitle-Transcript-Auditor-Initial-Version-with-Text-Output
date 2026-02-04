@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Subtitle Auditor v4.4 | Scorecard Edition</title>
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js"></script>
+    <style>
+        :root { --primary: #2563eb; --vtt-color: #f97316; --txt-color: #3b82f6; --bg: #f8fafc; }
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: #1e293b; padding: 20px; }
+        .container { max-width: 1100px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); }
+        
+        /* Scorecard Styles */
+        .scorecard { background: #f1f5f9; border: 1px solid #e2e8f0; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; }
+        .score-box { text-align: center; }
+        .score-val { font-size: 2rem; font-weight: bold; color: var(--primary); }
+        .score-label { font-size: 0.75rem; text-transform: uppercase; color: #64748b; }
+        .status-pill { padding: 4px 12px; border-radius: 20px; font-size: 0.85rem; font-weight: bold; }
+        .status-pass { background: #dcfce7; color: #166534; }
+        .status-fail { background: #fee2e2; color: #991b1b; }
+
+        .setup-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 20px 0; }
+        .card { border: 1px solid #e2e8f0; padding: 15px; border-radius: 8px; background: #fff; }
+        textarea { width: 100%; height: 60px; border: 1px solid #cbd5e1; border-radius: 6px; padding: 8px; font-size: 0.85rem; box-sizing: border-box; }
+        button { background: var(--primary); color: white; border: none; padding: 16px; border-radius: 8px; cursor: pointer; width: 100%; font-weight: bold; font-size: 1.1rem; }
+        button:disabled { background: #94a3b8; cursor: wait; }
+        
+        .section-header { margin-top: 30px; padding: 12px; font-weight: bold; border-radius: 8px 8px 0 0; color: white; }
+        .header-vtt { background: var(--vtt-color); }
+        .header-txt { background: var(--txt-color); }
+        .output-container { border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 8px 8px; background: white; margin-bottom: 20px; }
+        .row { display: grid; grid-template-columns: 100px 1fr; gap: 15px; padding: 12px; border-bottom: 1px solid #f1f5f9; font-size: 0.9rem; }
+        .badge { font-family: monospace; font-weight: bold; font-size: 0.75rem; padding: 3px 6px; border-radius: 4px; text-align: center; }
+        .ts-vtt { background: #ffedd5; color: #9a3412; border: 1px solid #fed7aa; }
+        .ts-txt { background: #dbeafe; color: #1e40af; border: 1px solid #bfdbfe; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Subtitle & Transcript Auditor</h1>
+    
+    <div class="setup-grid">
+        <div class="card"><strong>1. Subtitle (.vtt)</strong><input type="file" id="subFile" accept=".vtt"></div>
+        <div class="card"><strong>2. Transcript (.txt)</strong><input type="file" id="transFile" accept=".txt"></div>
+    </div>
+
+    <div class="setup-grid">
+        <div class="card">Non-Accessible<textarea id="l_acc">Click, Tap, Press, Hover, Zoom, Pinch, Swipe, Scroll, Drag and drop</textarea></div>
+        <div class="card">Directional<textarea id="l_dir">Left, Right, Top, Bottom, Above, Below, Under, Beside</textarea></div>
+        <div class="card">Non-Inclusive<textarea id="l_inc">See, Look, Hear, Watch, View, Observe, Listen</textarea></div>
+        <div class="card">Vague Terms<textarea id="l_oth">This, That, Here, There, These, Those, Like so</textarea></div>
+    </div>
+
+    <button id="runBtn" onclick="process()" disabled>Initializing AI Engine...</button>
+    <div id="resultsArea"></div>
+</div>
+
+<script>
+    function escapeHTML(str) { return str ? str.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])) : ""; }
+
+    let pyodide;
+    async function init() {
+        pyodide = await loadPyodide();
+        document.getElementById('runBtn').innerText = "Analyze Files";
+        document.getElementById('runBtn').disabled = false;
+    }
+    init();
+
+    async function process() {
+        const subFile = document.getElementById('subFile').files[0];
+        const transFile = document.getElementById('transFile').files[0];
+        if(!subFile || !transFile) return alert("Please select both files.");
+
+        window.data_sub = await subFile.text();
+        window.data_trans = await transFile.text();
+        window.l_acc = document.getElementById('l_acc').value;
+        window.l_dir = document.getElementById('l_dir').value;
+        window.l_inc = document.getElementById('l_inc').value;
+        window.l_oth = document.getElementById('l_oth').value;
+
+        const pythonCode = `
+import re
+import difflib
+from js import data_sub, data_trans, l_acc, l_dir, l_inc, l_oth
+
+def clean(text):
+    return re.sub(r'[^\\w\\s]', '', text).lower().strip()
+
+def audit():
+    # 1. Similarity Logic
+    s_clean = " ".join(re.findall(r'\\b\\w+\\b', data_sub.lower()))
+    t_clean = " ".join(re.findall(r'\\b\\w+\\b', data_trans.lower()))
+    ratio = difflib.SequenceMatcher(None, t_clean, s_clean).ratio()
+    pct = round(ratio * 100)
+
+    # 2. Accessibility (Always Runs)
+    check_list = [x.strip().lower() for x in (l_acc + "," + l_dir + "," + l_inc + "," + l_oth).split(",") if x.strip()]
+    a_vtt, a_txt = [], []
+    ts = "00:00"
+    for line in data_sub.splitlines():
+        m = re.search(r'(\\d{2}:(\\d{2}:\\d{2}))\\.', line)
+        if m: ts = m.group(2); continue
+        for w in check_list:
+            if re.search(f'\\\\b{re.escape(w)}\\\\b', line, re.I):
+                a_vtt.append({"ts": ts, "word": w.upper(), "line": line.strip()})
+    
+    for s in re.split(r'(?<=[.!?])\\s+', data_trans.replace('\\n', ' ')):
+        for w in check_list:
+            if re.search(f'\\\\b{re.escape(w)}\\\\b', s, re.I):
+                a_txt.append({"word": w.upper(), "line": s.strip()})
+
+    # 3. Mismatches (Only if > 50%)
+    m_vtt, m_txt = [], []
+    if pct >= 50:
+        sub_lines = [l.strip() for l in data_sub.splitlines() if l.strip() and "-->" not in l and l.upper() != "WEBVTT" and not l.isdigit()]
+        s_tokens = (" ".join(sub_lines)).split()
+        t_tokens = data_trans.split()
+        sm = difflib.SequenceMatcher(None, [clean(x) for x in t_tokens if clean(x)], [clean(x) for x in s_tokens if clean(x)], autojunk=False)
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            if tag in ['replace', 'delete']:
+                m_txt.append({"word": " ".join(t_tokens[i1:i2]).upper(), "line": "Transcript section mismatch"})
+            if tag in ['replace', 'insert']:
+                m_vtt.append({"word": " ".join(s_tokens[j1:j2]).upper(), "ts": "VTT", "line": "Subtitle section mismatch"})
+
+    return {"pct": pct, "m_vtt": m_vtt, "m_txt": m_txt, "a_vtt": a_vtt, "a_txt": a_txt}
+
+audit()
+`;
+        const res = (await pyodide.runPythonAsync(pythonCode)).toJs();
+        render(res);
+    }
+
+    function render(data) {
+        const area = document.getElementById('resultsArea');
+        const pct = data.get('pct');
+        const pass = pct >= 50;
+
+        area.innerHTML = `
+            <div class="scorecard">
+                <div class="score-box">
+                    <div class="score-label">Similarity Match</div>
+                    <div class="score-val">${pct}%</div>
+                </div>
+                <div>
+                    <span class="status-pill ${pass ? 'status-pass' : 'status-fail'}">
+                        ${pass ? '✅ High Match: Detailed Audit Enabled' : '⚠️ Low Match: Sequence Audit Skipped'}
+                    </span>
+                </div>
+            </div>
+        `;
+
+        const sections = [
+            { id: "m_vtt", title: "1) Extra Content in Subtitle", css: "header-vtt", b: "ts-vtt" },
+            { id: "m_txt", title: "2) Missing Content from Subtitle", css: "header-txt", b: "ts-txt" },
+            { id: "a_vtt", title: "3) Accessibility Flags (Subtitle)", css: "header-vtt", b: "ts-vtt" },
+            { id: "a_txt", title: "4) Accessibility Flags (Transcript)", css: "header-txt", b: "ts-txt" }
+        ];
+
+        sections.forEach(sec => {
+            area.innerHTML += `<div class="section-header ${sec.css}">${sec.title} (${data.get(sec.id).length})</div>`;
+            const container = document.createElement('div');
+            container.className = "output-container";
+            const items = data.get(sec.id);
+            if (items.length === 0) container.innerHTML = `<div style="padding:20px; color:#94a3b8; text-align:center;">None detected.</div>`;
+            else items.forEach(item => {
+                container.innerHTML += `<div class="row"><span class="badge ${sec.b}">${item.has('ts') ? item.get('ts') : 'TXT'}</span>
+                <div><strong>${escapeHTML(item.get('word'))}</strong><br><small>${escapeHTML(item.get('line'))}</small></div></div>`;
+            });
+            area.appendChild(container);
+        });
+    }
+</script>
+</body>
+</html>
